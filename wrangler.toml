@@ -9,4 +9,4 @@ crons = ["0 7,9,11,13,15,17 * * *"]
 [[d1_databases]]
 binding = "DB"
 database_name = "wikipedia_bot_db"
-database_id = "BURAYA_D1_DATABASE_ID_GELECEK"
+database_id = "280a42a3-fc8c-4968-905b-cd905b32e818"
