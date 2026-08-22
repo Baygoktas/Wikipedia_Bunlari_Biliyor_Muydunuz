@@ -3,8 +3,25 @@ export default {
     ctx.waitUntil(runBot(env));
   },
   async fetch(request, env, ctx) {
-    await runBot(env);
-    return new Response("İşlem tamamlandı.", { status: 200 });
+    const url = new URL(request.url);
+    // Tarayıcının otomatik attığı favicon isteklerini yoksay
+    if (url.pathname === "/favicon.ico") {
+      return new Response(null, { status: 204 });
+    }
+
+    try {
+      const result = await runBot(env);
+      return new Response(result || "İşlem başarıyla tamamlandı.", { 
+        status: 200, 
+        headers: { "Content-Type": "text/plain; charset=utf-8" } 
+      });
+    } catch (err) {
+      console.error("Worker Hatası:", err);
+      return new Response(`Hata Detayı:\n${err.message}\n\nStack:\n${err.stack}`, { 
+        status: 500, 
+        headers: { "Content-Type": "text/plain; charset=utf-8" } 
+      });
+    }
   }
 };
 
@@ -12,7 +29,11 @@ async function runBot(env) {
   const TELEGRAM_BOT_TOKEN = env.TELEGRAM_BOT_TOKEN;
   const TELEGRAM_CHAT_ID = env.TELEGRAM_CHAT_ID || "-1004385291535";
 
-  // 1. 2010 ile 1 yıl öncesi arasında rastgele bir tarih belirle
+  if (!TELEGRAM_BOT_TOKEN) {
+    throw new Error("TELEGRAM_BOT_TOKEN ortam değişkeni bulunamadı! Lütfen Worker Settings -> Variables & Secrets altından ekleyin.");
+  }
+
+  // 1. Rastgele tarih aralığı (2010 ile 1 yıl öncesi)
   const now = new Date();
   const cutoff = new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000);
   const start = new Date("2010-01-01T00:00:00Z");
@@ -21,7 +42,7 @@ async function runBot(env) {
   const targetDate = new Date(start.getTime() + randomMs);
   const targetDateStr = targetDate.toISOString().slice(0, 10);
 
-  // 2. Wikipedia arşiv sayfa listesini çek
+  // 2. Arşiv listesini çek
   const listUrl = new URL("https://tr.wikipedia.org/w/api.php");
   listUrl.search = new URLSearchParams({
     action: "query",
@@ -35,8 +56,13 @@ async function runBot(env) {
   });
 
   const listRes = await fetch(listUrl, {
-    headers: { "User-Agent": "CloudflareWorker-WikipediaBot/2.0" }
+    headers: { "User-Agent": "WikipediaTelegramBot/1.0 (https://t.me; contact@example.com)" }
   });
+  
+  if (!listRes.ok) {
+    throw new Error(`Wikipedia liste API hatası: ${listRes.statusText}`);
+  }
+
   const listData = await listRes.json();
   const pages = listData?.query?.allpages || [];
 
@@ -50,22 +76,25 @@ async function runBot(env) {
     .filter(x => new Date(x.date).getTime() < cutoff.getTime());
 
   if (!candidates.length) {
-    console.log("Aday arşiv sayfası bulunamadı.");
-    return;
+    return "Aday arşiv sayfası bulunamadı, bir sonraki cron çalışmasında tekrar denenecek.";
   }
 
-  // 3. D1 üzerinden kontrol ederek henüz paylaşılmamış sayfa bul
+  // 3. D1 üzerinden mükerrer kontrolü
   const shuffled = candidates.sort(() => 0.5 - Math.random());
   let selected = null;
 
   for (const item of shuffled) {
-    const row = await env.DB.prepare("SELECT page_title FROM sent_facts WHERE page_title = ?")
-      .bind(item.title)
-      .first();
+    try {
+      const row = await env.DB.prepare("SELECT page_title FROM sent_facts WHERE page_title = ?")
+        .bind(item.title)
+        .first();
 
-    if (!row) {
-      selected = item;
-      break;
+      if (!row) {
+        selected = item;
+        break;
+      }
+    } catch (dbErr) {
+      throw new Error(`D1 Veritabanı sorgu hatası: ${dbErr.message}. 'sent_facts' tablosunun oluşturulduğundan emin olun.`);
     }
   }
 
@@ -73,7 +102,7 @@ async function runBot(env) {
     selected = shuffled[0];
   }
 
-  // 4. Arşiv sayfasının içeriğini çek
+  // 4. İçeriği çek
   const parseUrl = new URL("https://tr.wikipedia.org/w/api.php");
   parseUrl.search = new URLSearchParams({
     action: "parse",
@@ -85,17 +114,16 @@ async function runBot(env) {
   });
 
   const parseRes = await fetch(parseUrl, {
-    headers: { "User-Agent": "CloudflareWorker-WikipediaBot/2.0" }
+    headers: { "User-Agent": "WikipediaTelegramBot/1.0" }
   });
   const parseData = await parseRes.json();
   const rawWikitext = parseData?.parse?.wikitext || "";
 
   if (!rawWikitext) {
-    console.log("Sayfa içeriği alınamadı.");
-    return;
+    return `Sayfa içeriği boş geldi: ${selected.title}`;
   }
 
-  // 5. Görsel dosya adı tespiti ve URL çözümlemesi
+  // 5. Görsel var mı kontrol et
   const imageMatch = rawWikitext.match(/\[\[(?:Dosya|File|Media):([^|\]]+)/i);
   let imageUrl = null;
 
@@ -103,13 +131,12 @@ async function runBot(env) {
     imageUrl = await fetchWikipediaImageUrl(imageMatch[1].trim());
   }
 
-  // 6. Metni temizle ve dinamik sayfa bağlantısını oluştur
+  // 6. Metni temizle
   let cleanText = temizleWikitext(rawWikitext);
   cleanText = cleanText.replace(/^(?:Vikipedi|Biliyor muydu(?:nuz)?\??|Arşiv|Ana sayfa)[^.!?]*[.!?]?\s*/i, "").trim();
 
   if (!cleanText || cleanText.length < 20) {
-    console.log("Kullanılabilir metin bulunamadı.");
-    return;
+    return "Metin temizlendikten sonra kullanılabilir uzunlukta kalmadı.";
   }
 
   const encodedPageTitle = encodeURIComponent(selected.title.replace(/ /g, "_"));
@@ -120,7 +147,7 @@ async function runBot(env) {
     `👀 ${escapeHtml(cleanText)}\n\n` +
     `🔎 Kaynak: <a href="${dynamicSourceUrl}">Vikipedi</a>`;
 
-  // 7. Telegram gönderimi
+  // 7. Telegram'a gönder
   let tgSuccess = false;
 
   if (imageUrl) {
@@ -135,7 +162,8 @@ async function runBot(env) {
         parse_mode: "HTML"
       })
     });
-    tgSuccess = res.ok;
+    const photoData = await res.json();
+    tgSuccess = photoData.ok;
   }
 
   if (!imageUrl || !tgSuccess) {
@@ -150,16 +178,22 @@ async function runBot(env) {
         disable_web_page_preview: true
       })
     });
-    tgSuccess = res.ok;
+    const msgData = await res.json();
+    if (!msgData.ok) {
+      throw new Error(`Telegram API Hatası: ${msgData.description || JSON.stringify(msgData)}`);
+    }
+    tgSuccess = true;
   }
 
-  // 8. Gönderim başarılıysa D1'e kaydet
+  // 8. D1 Veritabanına kaydet
   if (tgSuccess) {
     const factHash = simpleHash(cleanText);
     await env.DB.prepare("INSERT OR IGNORE INTO sent_facts (page_title, fact_hash) VALUES (?, ?)")
       .bind(selected.title, factHash)
       .run();
   }
+
+  return `Başarılı! Mesaj gönderildi: ${selected.title}`;
 }
 
 async function fetchWikipediaImageUrl(fileName) {
@@ -175,7 +209,7 @@ async function fetchWikipediaImageUrl(fileName) {
     });
 
     const res = await fetch(imgApiUrl, {
-      headers: { "User-Agent": "CloudflareWorker-WikipediaBot/2.0" }
+      headers: { "User-Agent": "WikipediaTelegramBot/1.0" }
     });
     const data = await res.json();
     const pages = data?.query?.pages;
@@ -183,7 +217,7 @@ async function fetchWikipediaImageUrl(fileName) {
       return pages[0].imageinfo[0].url;
     }
   } catch (e) {
-    console.error("Görsel URL çözümleme hatası:", e);
+    console.error("Görsel çözümleme hatası:", e);
   }
   return null;
 }
@@ -231,4 +265,4 @@ function simpleHash(str) {
     hash |= 0;
   }
   return String(hash);
-      }
+}
