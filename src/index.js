@@ -152,9 +152,9 @@ async function runBot(env) {
   const dynamicSourceUrl = `https://tr.wikipedia.org/wiki/${encodedPageTitle}`;
 
   const messageText = 
-    `💡 <b>BUNU BİLİYOR MUYDUNUZ?</b>\n\n` +
+    `💡 <b>BİLİYOR MUYDUNUZ?</b>\n\n` +
     `👀 ${escapeHtml(cleanText)}\n\n` +
-    `🔎 Kaynak: <a href="${dynamicSourceUrl}">Vikipedi</a>`;
+    `🔎 Kaynak: <a href="${dynamicSourceUrl}">Vikipedia</a>`;
 
   // 7. Telegram'a gönder
   let tgSuccess = false;
