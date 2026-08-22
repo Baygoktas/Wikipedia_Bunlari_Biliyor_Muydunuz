@@ -4,7 +4,6 @@ export default {
   },
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    // Tarayıcının otomatik attığı favicon isteklerini yoksay
     if (url.pathname === "/favicon.ico") {
       return new Response(null, { status: 204 });
     }
@@ -25,15 +24,33 @@ export default {
   }
 };
 
+const WIKI_HEADERS = {
+  "User-Agent": "WikipediaBiliyorMuydunuzBot/2.0 (https://t.me/baygoktas; contact: telegramherokuhesabi3@gmail.com)",
+  "Api-User-Agent": "WikipediaBiliyorMuydunuzBot/2.0 (https://t.me/baygoktas; contact: telegramherokuhesabi3@gmail.com)",
+  "Accept": "application/json"
+};
+
+async function fetchWithRetry(url, options = {}, retries = 2) {
+  for (let i = 0; i <= retries; i++) {
+    const res = await fetch(url, options);
+    if (res.status !== 429 && res.status !== 503) {
+      return res;
+    }
+    // Rate limit durumunda bekle ve tekrar dene
+    await new Promise(r => setTimeout(r, (i + 1) * 1500));
+  }
+  return fetch(url, options);
+}
+
 async function runBot(env) {
   const TELEGRAM_BOT_TOKEN = env.TELEGRAM_BOT_TOKEN;
   const TELEGRAM_CHAT_ID = env.TELEGRAM_CHAT_ID || "-1004385291535";
 
   if (!TELEGRAM_BOT_TOKEN) {
-    throw new Error("TELEGRAM_BOT_TOKEN ortam değişkeni bulunamadı! Lütfen Worker Settings -> Variables & Secrets altından ekleyin.");
+    throw new Error("TELEGRAM_BOT_TOKEN ortam değişkeni bulunamadı!");
   }
 
-  // 1. Rastgele tarih aralığı (2010 ile 1 yıl öncesi)
+  // 1. Rastgele tarih aralığı
   const now = new Date();
   const cutoff = new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000);
   const start = new Date("2010-01-01T00:00:00Z");
@@ -55,12 +72,10 @@ async function runBot(env) {
     apfrom: `Biliyor_muydunuz?/${targetDateStr}`
   });
 
-  const listRes = await fetch(listUrl, {
-    headers: { "User-Agent": "WikipediaTelegramBot/1.0 (https://t.me; contact@example.com)" }
-  });
+  const listRes = await fetchWithRetry(listUrl, { headers: WIKI_HEADERS });
   
   if (!listRes.ok) {
-    throw new Error(`Wikipedia liste API hatası: ${listRes.statusText}`);
+    throw new Error(`Wikipedia liste API hatası (${listRes.status}): ${listRes.statusText}`);
   }
 
   const listData = await listRes.json();
@@ -84,17 +99,13 @@ async function runBot(env) {
   let selected = null;
 
   for (const item of shuffled) {
-    try {
-      const row = await env.DB.prepare("SELECT page_title FROM sent_facts WHERE page_title = ?")
-        .bind(item.title)
-        .first();
+    const row = await env.DB.prepare("SELECT page_title FROM sent_facts WHERE page_title = ?")
+      .bind(item.title)
+      .first();
 
-      if (!row) {
-        selected = item;
-        break;
-      }
-    } catch (dbErr) {
-      throw new Error(`D1 Veritabanı sorgu hatası: ${dbErr.message}. 'sent_facts' tablosunun oluşturulduğundan emin olun.`);
+    if (!row) {
+      selected = item;
+      break;
     }
   }
 
@@ -113,9 +124,7 @@ async function runBot(env) {
     redirects: "1"
   });
 
-  const parseRes = await fetch(parseUrl, {
-    headers: { "User-Agent": "WikipediaTelegramBot/1.0" }
-  });
+  const parseRes = await fetchWithRetry(parseUrl, { headers: WIKI_HEADERS });
   const parseData = await parseRes.json();
   const rawWikitext = parseData?.parse?.wikitext || "";
 
@@ -208,9 +217,7 @@ async function fetchWikipediaImageUrl(fileName) {
       formatversion: "2"
     });
 
-    const res = await fetch(imgApiUrl, {
-      headers: { "User-Agent": "WikipediaTelegramBot/1.0" }
-    });
+    const res = await fetchWithRetry(imgApiUrl, { headers: WIKI_HEADERS });
     const data = await res.json();
     const pages = data?.query?.pages;
     if (pages && pages[0]?.imageinfo && pages[0].imageinfo[0]?.url) {
